@@ -45,7 +45,7 @@ class ComfyQwenImageWrapper(nn.Module):
         # LRU cache for LoRA state_dicts to avoid repeated file I/O.
         # Key: str(path) -> (mtime_ns, state_dict)
         self._lora_cache: OrderedDict[str, Tuple[int, dict]] = OrderedDict()
-        self._lora_cache_max = 8
+        self._lora_cache_max = 32  # Increased from 8 to support more LoRA combinations
 
         self.cpu_offload_setting = cpu_offload_setting
         self.vram_margin_gb = vram_margin_gb
@@ -105,17 +105,13 @@ class ComfyQwenImageWrapper(nn.Module):
         # Check if the LoRA stack has changed (signature-based) or model is dirty
         current_sig = self._build_loras_signature(self.loras)
         
-        logger.info(f"[LORA-DEBUG] Forward called. Wrapper ID: {id(self)}")
-        logger.info(f"[LORA-DEBUG] Old signature: {self._applied_loras_sig}")
-        logger.info(f"[LORA-DEBUG] New signature: {current_sig}")
-        logger.info(f"[LORA-DEBUG] Model is dirty: {model_is_dirty}")
-        logger.info(f"[LORA-DEBUG] Number of LoRAs in self.loras: {len(self.loras)}")
+        logger.debug(f"Forward: wrapper={id(self)}, loras={len(self.loras)}, dirty={model_is_dirty}")
         
         if self._applied_loras_sig != current_sig or model_is_dirty:
             if self._applied_loras_sig != current_sig:
-                logger.info(f"[LORA-DEBUG] ⚠️ RECOMPOSITION TRIGGERED: Signature mismatch")
+                logger.info(f"⚠️ LoRA recomposition triggered: signature changed ({len(self.loras)} LoRAs)")
             if model_is_dirty:
-                logger.info(f"[LORA-DEBUG] ⚠️ RECOMPOSITION TRIGGERED: Model is dirty")
+                logger.info(f"⚠️ LoRA recomposition triggered: model state dirty")
             
             # The compose function handles resetting before applying the new stack
             reset_lora_v2(self.model)
@@ -283,9 +279,7 @@ class ComfyQwenImageWrapper(nn.Module):
             else:
                 sig_items.append(("o", id(src), float(strength)))
         
-        signature = tuple(sig_items)
-        logger.debug(f"[LORA-DEBUG] Built signature with {len(sig_items)} LoRA(s)")
-        return signature
+        return tuple(sig_items)
 
     def _get_lora_state_dict(self, src: Union[str, Path, dict]) -> dict:
         """Return a LoRA state_dict from cache or load it once.
