@@ -18,12 +18,9 @@ logger = logging.getLogger(__name__)
 
 
 class NunchakuQwenImageLoraLoader:
-    """
-    Node for loading and applying a LoRA to a Nunchaku Qwen Image model.
-    """
     @classmethod
-    def IS_CHANGED(s, *args, **kwargs):
-        return float("NaN")
+    def IS_CHANGED(cls, model, lora_name: str, lora_strength: float, **kwargs):
+        return f"{lora_name}:{lora_strength}"
 
     @classmethod
     def INPUT_TYPES(s):
@@ -81,6 +78,7 @@ class NunchakuQwenImageLoraLoader:
         ret_model_wrapper.model = transformer
 
         lora_path = folder_paths.get_full_path_or_raise("loras", lora_name)
+        # Append path; wrapper LRU cache will avoid repeated file I/O
         ret_model_wrapper.loras.append((lora_path, lora_strength))
 
         logger.info(f"LoRA added: {lora_name} (strength={lora_strength})")
@@ -94,8 +92,16 @@ class NunchakuQwenImageLoraStack:
     Node for loading and applying multiple LoRAs to a Nunchaku Qwen Image model.
     """
     @classmethod
-    def IS_CHANGED(s, *args, **kwargs):
-        return float("NaN")
+    def IS_CHANGED(cls, model, **kwargs):
+        loras_to_apply = []
+        for i in range(1, 6):
+            lora_name = kwargs.get(f"lora_name_{i}")
+            lora_strength = kwargs.get(f"lora_strength_{i}", 1.0)
+            if lora_name and lora_name != "None" and abs(lora_strength) > 1e-5:
+                loras_to_apply.append(f"{lora_name}:{lora_strength}")
+        
+        # Create a stable string representation of the LoRA stack to act as a cache key
+        return ",".join(sorted(loras_to_apply))
 
     @classmethod
     def INPUT_TYPES(s):
@@ -151,6 +157,7 @@ class NunchakuQwenImageLoraStack:
 
         for lora_name, lora_strength in loras_to_apply:
             lora_path = folder_paths.get_full_path_or_raise("loras", lora_name)
+            # Append path; wrapper LRU cache will avoid repeated file I/O
             ret_model_wrapper.loras.append((lora_path, lora_strength))
             logger.debug(f"LoRA added to stack: {lora_name} (strength={lora_strength})")
 

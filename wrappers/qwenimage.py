@@ -1,5 +1,7 @@
 from typing import Callable, List, Tuple, Union
 from pathlib import Path
+from collections import OrderedDict
+import time
 
 import torch
 from torch import nn
@@ -8,7 +10,7 @@ import logging
 
 from nunchaku import NunchakuQwenImageTransformer2DModel
 from nunchaku.caching.fbcache import cache_context, create_cache_context
-from ..nunchaku_code.lora_qwen import compose_loras_v2, reset_lora_v2
+from ..nunchaku_code.lora_qwen import compose_loras_v2, reset_lora_v2, _load_lora_state_dict
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +39,13 @@ class ComfyQwenImageWrapper(nn.Module):
         self.config = config
         # This list is the authoritative state, modified by LoRA loader nodes
         self.loras: List[Tuple[Union[str, Path, dict], float]] = []
-        # This tracks the LoRAs currently composed into the model to detect changes
-        self._applied_loras: List[Tuple[Union[str, Path, dict], float]] = None
+        # Lightweight signature of applied LoRA stack to detect changes
+        self._applied_loras_sig = None
+
+        # LRU cache for LoRA state_dicts to avoid repeated file I/O.
+        # Key: str(path) -> (mtime_ns, state_dict)
+        self._lora_cache: OrderedDict[str, Tuple[int, dict]] = OrderedDict()
+        self._lora_cache_max = 8
 
         self.cpu_offload_setting = cpu_offload_setting
         self.vram_margin_gb = vram_margin_gb
@@ -95,11 +102,12 @@ class ComfyQwenImageWrapper(nn.Module):
             not self.loras and # We expect no LoRA
             hasattr(self.model, "_lora_slots") and self.model._lora_slots # But the model actually has LoRA
         )
-        # Check if the LoRA stack has been changed by a loader node
-        if self._applied_loras != self.loras or model_is_dirty:
+        # Check if the LoRA stack has changed (signature-based) or model is dirty
+        current_sig = self._build_loras_signature(self.loras)
+        if self._applied_loras_sig != current_sig or model_is_dirty:
             # The compose function handles resetting before applying the new stack
             reset_lora_v2(self.model)
-            self._applied_loras = self.loras.copy()
+            self._applied_loras_sig = current_sig
 
             # --- NEW DYNAMIC VRAM CHECK (conditionally applied) ---
 
@@ -136,7 +144,22 @@ class ComfyQwenImageWrapper(nn.Module):
             # --- END NEW VRAM CHECK ---
 
             # 4. Compose LoRAs. This changes internal tensor shapes.
-            compose_loras_v2(self.model, self.loras)
+            # Preload state_dicts with a small LRU cache to avoid repeated file I/O.
+            prepared_loras: List[Tuple[Union[dict, str, Path], float]] = []
+            for src, strength in self.loras:
+                if isinstance(src, (str, Path)):
+                    sd = self._get_lora_state_dict(src)
+                    prepared_loras.append((sd, strength))
+                else:
+                    prepared_loras.append((src, strength))
+
+            # Skip compose when list empty (we already reset above)
+            if prepared_loras:
+                t0 = time.perf_counter()
+                with torch.no_grad():
+                    compose_loras_v2(self.model, prepared_loras)
+                dt_ms = (time.perf_counter() - t0) * 1000.0
+                logger.info(f"LoRA composition (n={len(prepared_loras)}) took {dt_ms:.1f} ms")
 
             # 5. Re-build offload manager if it's supposed to be on
             # This block now runs if offload was on *or* if our new check decided to turn it on.
@@ -227,3 +250,58 @@ class ComfyQwenImageWrapper(nn.Module):
                     transformer_options=transformer_options,
                     **kwargs,
                 )
+
+    def _build_loras_signature(self, loras: List[Tuple[Union[str, Path, dict], float]]):
+        """Build a hashable signature for the current LoRA stack.
+
+        For file paths: include path string and mtime; for dicts: include object id.
+        Strength is included to capture changes in weights.
+        """
+        sig_items = []
+        for src, strength in loras:
+            if isinstance(src, (str, Path)):
+                p = Path(src)
+                try:
+                    mtime = p.stat().st_mtime_ns
+                except Exception:
+                    mtime = 0
+                sig_items.append(("p", str(p), mtime, float(strength)))
+            elif isinstance(src, dict):
+                sig_items.append(("d", id(src), float(strength)))
+            else:
+                sig_items.append(("o", id(src), float(strength)))
+        return tuple(sig_items)
+
+    def _get_lora_state_dict(self, src: Union[str, Path, dict]) -> dict:
+        """Return a LoRA state_dict from cache or load it once.
+
+        Accepts a path (str/Path) or a preloaded dict and returns a dict.
+        Uses file mtime to invalidate cache entries if the file changes.
+        """
+        if isinstance(src, dict):
+            return src
+
+        p = Path(src)
+        key = str(p)
+        try:
+            mtime = p.stat().st_mtime_ns
+        except Exception:
+            # Fall back to direct load; if stat fails, do not cache
+            return _load_lora_state_dict(p)
+
+        cached = self._lora_cache.get(key)
+        if cached is not None:
+            cached_mtime, state = cached
+            if cached_mtime == mtime:
+                # Touch in LRU order
+                self._lora_cache.move_to_end(key)
+                return state
+
+        # Load fresh and insert/update cache
+        state = _load_lora_state_dict(p)
+        self._lora_cache[key] = (mtime, state)
+        self._lora_cache.move_to_end(key)
+        # Enforce simple LRU size bound
+        if len(self._lora_cache) > self._lora_cache_max:
+            self._lora_cache.popitem(last=False)
+        return state
