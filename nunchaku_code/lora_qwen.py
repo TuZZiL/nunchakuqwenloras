@@ -105,6 +105,9 @@ KEY_MAPPING = [
 _RE_LORA_SUFFIX = re.compile(r"\.(?P<tag>lora(?:[._](?:A|B|down|up)))(?:\.[^.]+)*\.weight$")
 _RE_ALPHA_SUFFIX = re.compile(r"\.(?:alpha|lora_alpha)(?:\.[^.]+)*$")
 
+# Global cache for parsed LoRA keys to avoid repeated regex operations
+_PARSED_KEYS_CACHE: dict = {}
+
 
 # --- Helper Functions ---
 def _rename_layer_underscore_layer_name(old_name: str) -> str:
@@ -154,8 +157,12 @@ def _rename_layer_underscore_layer_name(old_name: str) -> str:
 def _classify_and_map_key(key: str) -> Optional[Tuple[str, str, Optional[str], str]]:
     """
     Efficiently classifies a LoRA key using the centralized KEY_MAPPING.
-    The implementation is new and optimized, but the name and signature are preserved.
+    Uses caching to avoid repeated regex operations on the same keys.
     """
+    # Check cache first
+    if key in _PARSED_KEYS_CACHE:
+        return _PARSED_KEYS_CACHE[key]
+    
     k = key
     if k.startswith("transformer."):
         k = k[len("transformer."):]
@@ -184,16 +191,20 @@ def _classify_and_map_key(key: str) -> Optional[Tuple[str, str, Optional[str], s
             base = k[: m.start()]
 
     if base is None or ab is None:
-        return None  # Not a recognized LoRA key format
-
-    for pattern, template, group, comp_fn in KEY_MAPPING:
-        match = pattern.match(base)
-        if match:
-            final_key = match.expand(template)
-            component = comp_fn(match) if comp_fn else None
-            return group, final_key, component, ab
-
-    return None
+        result = None  # Not a recognized LoRA key format
+    else:
+        result = None
+        for pattern, template, group, comp_fn in KEY_MAPPING:
+            match = pattern.match(base)
+            if match:
+                final_key = match.expand(template)
+                component = comp_fn(match) if comp_fn else None
+                result = (group, final_key, component, ab)
+                break
+    
+    # Cache the result (even if None) to avoid re-parsing
+    _PARSED_KEYS_CACHE[key] = result
+    return result
 
 
 def _is_indexable_module(m):
@@ -382,6 +393,7 @@ def compose_loras_v2(
     Resets and composes multiple LoRAs into the model with individual strengths.
     """
     logger.info(f"Composing {len(lora_configs)} LoRAs...")
+    logger.debug(f"Key parsing cache size: {len(_PARSED_KEYS_CACHE)} entries")
     reset_lora_v2(model)
 
     aggregated_weights: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
