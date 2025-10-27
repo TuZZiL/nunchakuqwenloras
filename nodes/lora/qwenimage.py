@@ -101,7 +101,10 @@ class NunchakuQwenImageLoraStack:
                 loras_to_apply.append(f"{lora_name}:{lora_strength}")
         
         # Create a stable string representation of the LoRA stack to act as a cache key
-        return ",".join(sorted(loras_to_apply))
+        result = ",".join(sorted(loras_to_apply))
+        logger.info(f"[LORA-DEBUG] IS_CHANGED called. Result: {result}")
+        logger.info(f"[LORA-DEBUG] Model ID: {id(model)}")
+        return result
 
     @classmethod
     def INPUT_TYPES(s):
@@ -127,6 +130,8 @@ class NunchakuQwenImageLoraStack:
     DESCRIPTION = "Apply multiple LoRAs to a diffusion model in a single node."
 
     def load_lora_stack(self, model, **kwargs):
+        logger.info(f"[LORA-DEBUG] load_lora_stack called. Model ID: {id(model)}")
+        
         loras_to_apply = []
         for i in range(1, 6):
             lora_name = kwargs.get(f"lora_name_{i}")
@@ -134,6 +139,8 @@ class NunchakuQwenImageLoraStack:
             if lora_name and lora_name != "None" and abs(lora_strength) > 1e-5:
                 loras_to_apply.append((lora_name, lora_strength))
 
+        logger.info(f"[LORA-DEBUG] LoRAs to apply: {len(loras_to_apply)}")
+        
         if not loras_to_apply:
             return (model,)
 
@@ -152,6 +159,9 @@ class NunchakuQwenImageLoraStack:
         ret_model_wrapper = ret_model.model.diffusion_model
         model_wrapper.model = transformer
         ret_model_wrapper.model = transformer
+        
+        logger.info(f"[LORA-DEBUG] Model deepcopy created. New model ID: {id(ret_model)}")
+        logger.info(f"[LORA-DEBUG] New wrapper ID: {id(ret_model_wrapper)}")
 
         ret_model_wrapper.loras = model_wrapper.loras.copy()
 

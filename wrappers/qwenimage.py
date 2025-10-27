@@ -104,7 +104,19 @@ class ComfyQwenImageWrapper(nn.Module):
         )
         # Check if the LoRA stack has changed (signature-based) or model is dirty
         current_sig = self._build_loras_signature(self.loras)
+        
+        logger.info(f"[LORA-DEBUG] Forward called. Wrapper ID: {id(self)}")
+        logger.info(f"[LORA-DEBUG] Old signature: {self._applied_loras_sig}")
+        logger.info(f"[LORA-DEBUG] New signature: {current_sig}")
+        logger.info(f"[LORA-DEBUG] Model is dirty: {model_is_dirty}")
+        logger.info(f"[LORA-DEBUG] Number of LoRAs in self.loras: {len(self.loras)}")
+        
         if self._applied_loras_sig != current_sig or model_is_dirty:
+            if self._applied_loras_sig != current_sig:
+                logger.info(f"[LORA-DEBUG] ⚠️ RECOMPOSITION TRIGGERED: Signature mismatch")
+            if model_is_dirty:
+                logger.info(f"[LORA-DEBUG] ⚠️ RECOMPOSITION TRIGGERED: Model is dirty")
+            
             # The compose function handles resetting before applying the new stack
             reset_lora_v2(self.model)
             self._applied_loras_sig = current_sig
@@ -270,7 +282,10 @@ class ComfyQwenImageWrapper(nn.Module):
                 sig_items.append(("d", id(src), float(strength)))
             else:
                 sig_items.append(("o", id(src), float(strength)))
-        return tuple(sig_items)
+        
+        signature = tuple(sig_items)
+        logger.debug(f"[LORA-DEBUG] Built signature with {len(sig_items)} LoRA(s)")
+        return signature
 
     def _get_lora_state_dict(self, src: Union[str, Path, dict]) -> dict:
         """Return a LoRA state_dict from cache or load it once.
