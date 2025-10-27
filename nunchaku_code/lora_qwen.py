@@ -440,6 +440,7 @@ def compose_loras_v2(
                 {"A": A, "B": B, "alpha": alpha, "strength": strength, "source": lora_name})
 
     # 2. Apply aggregated weights to the model
+    # Using batch GPU transfer with non_blocking flag to reduce overhead
     applied_modules_count = 0
 
     for module_name, parts in aggregated_weights.items():
@@ -447,8 +448,10 @@ def compose_loras_v2(
         if module is None or not (hasattr(module, "proj_down") and hasattr(module, "proj_up")):
             continue
 
-        all_A = []
-        all_B_scaled = []
+        # Prepare all tensors for batch transfer
+        all_A_cpu = []
+        all_B_scaled_cpu = []
+        
         for part in parts:
             A, B, alpha, strength = part["A"], part["B"], part["alpha"], part["strength"]
             r_lora = A.shape[0]
@@ -460,8 +463,15 @@ def compose_loras_v2(
             elif ".single_transformer_blocks." in resolved_name and ".norm.linear" in resolved_name:
                 B = reorder_adanorm_lora_up(B, splits=3)
 
-            all_A.append(A.to(dtype=module.proj_down.dtype, device=module.proj_down.device))
-            all_B_scaled.append((B * scale).to(dtype=module.proj_up.dtype, device=module.proj_up.device))
+            # Prepare tensors on CPU first (scaling, dtype conversion)
+            all_A_cpu.append(A)
+            all_B_scaled_cpu.append(B * scale)
+        
+        # Batch transfer to GPU with non_blocking for better performance
+        all_A = [t.to(dtype=module.proj_down.dtype, device=module.proj_down.device, non_blocking=True) 
+                 for t in all_A_cpu]
+        all_B_scaled = [t.to(dtype=module.proj_up.dtype, device=module.proj_up.device, non_blocking=True) 
+                        for t in all_B_scaled_cpu]
 
         if not all_A:
             continue
